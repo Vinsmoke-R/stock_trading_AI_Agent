@@ -11,6 +11,7 @@ from langchain_core.messages import AnyMessage
 from sentiment import sentiment
 from news_api import news_fetch
 from sentiment import classifier
+from stock_api import get_live_price
 
 from dotenv import load_dotenv
 
@@ -34,6 +35,7 @@ class TradingState(TypedDict):
     messages: list[AnyMessage]
     headlines : list
     sentiment : list
+    live_price : float  # from alpaca
 
 @tool 
 def buy(balance:float, stock_price:float, position:int):
@@ -77,6 +79,12 @@ tools = [buy,sell] # dont use "buy" like this  -> use like this - tool
 llm_with_tools = llm.bind_tools(tools)
 
 # graph functions 
+def get_live_price_node(state: TradingState):
+    result = get_live_price(state["name"])
+    if "error" in result:
+        return {"live_price": state["market_data"]["close"][-1]}  # fallback
+    return {"live_price": result["price"]}
+
 def get_data(state:TradingState):
     data = yf.download(
         tickers = state["name"],
@@ -157,7 +165,7 @@ def trading_model(state: TradingState):
     risk = state.get("risk", 0.5)
     # Get the most recent values
     latest = {k: v[-1] for k, v in indicators.items() if v}
-    current_price = market_data["close"][-1]
+    live_price = state.get("live_price", market_data["close"][-1])
 
     prompt = f"""
         You are a stock trading agent. You have ONLY two tools available:
@@ -167,7 +175,7 @@ def trading_model(state: TradingState):
         DO NOT call any other tool. DO NOT call "check_signal" or any other function.
         If the decision is HOLD, do not call any tool at all.
 
-        Current Price: {current_price:.2f}
+        Live Price: {live_price:.2f}
         Position (shares held): {position}
         Balance: {balance:.2f}
         Sentiment: {sentiment_data}
@@ -208,6 +216,7 @@ tool_node = ToolNode(tools)
 graph = StateGraph(TradingState)
 # graph nodes 
 graph.add_node("get_data",get_data)
+graph.add_node("get_live_price", get_live_price_node)
 graph.add_node("get_indicators",get_indicators)
 graph.add_node("get_news",get_news)
 graph.add_node("get_sentiment",get_sentiment)
@@ -217,7 +226,8 @@ graph.add_node("tools",tool_node) # (name,tool)
 # graph edges 
 graph.add_edge(START,"get_data")
 graph.add_edge(START,"get_news")
-graph.add_edge("get_data","get_indicators")
+graph.add_edge("get_data", "get_live_price")  
+graph.add_edge("get_live_price", "get_indicators")  
 graph.add_edge("get_news","get_sentiment")
 graph.add_edge("get_sentiment","trading_model")
 graph.add_edge("get_indicators","trading_model")
@@ -225,3 +235,4 @@ graph.add_conditional_edges("trading_model",tools_condition)
 graph.add_edge("tools","trading_model")         # going back to trading model
 
 stock_bot = graph.compile()
+print(stock_bot.get_graph().draw_ascii())
