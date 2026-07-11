@@ -2,9 +2,10 @@ from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
 from typing import TypedDict
 from indicators import add_indicators
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
+from langchain_core.messages import AIMessage
 import yfinance as yf
 import pandas as pd
 from langchain_core.messages import AnyMessage
@@ -12,6 +13,8 @@ from sentiment import sentiment
 from news_api import news_fetch
 from sentiment import classifier
 from stock_api import get_live_price
+from langgraph.graph.message import add_messages
+from typing import Annotated
 
 from dotenv import load_dotenv
 
@@ -32,7 +35,7 @@ class TradingState(TypedDict):
     signal : str # buy / hold / sell
     risk : float # 0.2-> safe , 0.8->risky
     balance : float # hold profit / loss 
-    messages: list[AnyMessage]
+    messages: Annotated[list[AnyMessage], add_messages]
     headlines : list
     sentiment : list
     live_price : float  # from alpaca
@@ -80,12 +83,16 @@ llm_with_tools = llm.bind_tools(tools)
 
 # graph functions 
 def get_live_price_node(state: TradingState):
+    print(">>> get_live_price started")
     result = get_live_price(state["name"])
     if "error" in result:
+        print(">>> get_live_price fallback to last close")
         return {"live_price": state["market_data"]["close"][-1]}  # fallback
+    print(f">>> get_live_price done: {result['price']}")
     return {"live_price": result["price"]}
 
 def get_data(state:TradingState):
+    print(">>> get_data started")
     data = yf.download(
         tickers = state["name"],
         period="1y",
@@ -100,6 +107,8 @@ def get_data(state:TradingState):
     data.columns = data.columns.droplevel(1)
     market_data = data
 
+    print(">>> get_data done")
+
     return{
         "market_data":{
             "close" : market_data['Close'].tolist(),
@@ -111,6 +120,7 @@ def get_data(state:TradingState):
     }
 
 def get_indicators(state:TradingState):
+    print(">>> get_indicators started")
     md = state["market_data"]
 
     df = pd.DataFrame({
@@ -122,6 +132,8 @@ def get_indicators(state:TradingState):
     })
     data = add_indicators(df)   # function used of another file
 
+    print(">>> get_indicators done")
+
     return {
         "indicators": {
             "ema" : data['EMA_20'].tolist(),
@@ -132,31 +144,43 @@ def get_indicators(state:TradingState):
     }
 
 def get_news(state: TradingState):
+    print(">>> get_news started")
     name = state['name']
 
     headlines = news_fetch(name)
+    print(f">>> get_news done: {len(headlines)} headlines fetched")
     return {"headlines":headlines}   # only return the changed data 
 
 
 def get_sentiment(state: TradingState):
+    print(">>> get_sentiment started")
     headlines = state["headlines"]
 
     sentiment_result = sentiment(classifier,headlines)
+    print(f">>> get_sentiment done: {sentiment_result}")
     return {"sentiment":sentiment_result}     # only return the changed data 
 
 import json
 
 def trading_model(state: TradingState):
     messages = state.get("messages", [])
-    if messages and isinstance(messages[-1], ToolMessage):
-        try:
-            tool_result = json.loads(messages[-1].content)
-            return {
-                "balance": tool_result.get("balance", state["balance"]),
-                "position": tool_result.get("position", state["position"])
-            }
-        except (json.JSONDecodeError, TypeError):
-            pass
+    
+    # check if tool was already executed — stop if so
+    if len(messages) >= 3:  # has at least one full tool cycle
+        tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+        if tool_messages:
+            last_tool = tool_messages[-1]
+            try:
+                tool_result = json.loads(last_tool.content)
+                print(">>> tool result found, ending")
+                return {
+                    "balance": tool_result.get("balance", state["balance"]),
+                    "position": tool_result.get("position", state["position"]),
+                    "messages": [AIMessage(content="Trade done.")],
+                    "signal": state.get("signal", "hold"),
+                }
+            except (json.JSONDecodeError, TypeError):
+                pass
     indicators = state["indicators"]
     market_data = state["market_data"]
     position = state.get("position", 0)
@@ -205,6 +229,8 @@ def trading_model(state: TradingState):
     if response.tool_calls:
         signal = response.tool_calls[0]["name"]  # "buy" or "sell"
 
+    print(">>> trading_model done")
+
     return {
         "messages": messages + [response],
         "signal": signal,
@@ -212,6 +238,19 @@ def trading_model(state: TradingState):
 
 tool_node = ToolNode(tools)
 
+def should_continue(state: TradingState):
+    messages = state.get("messages", [])
+    if not messages:
+        print(">>> should_continue: no messages → end")
+        return "end"
+    last = messages[-1]
+    print(f">>> should_continue: last message type = {type(last)}")
+    print(f">>> should_continue: has tool_calls = {hasattr(last, 'tool_calls')}")
+    if hasattr(last, "tool_calls"):
+        print(f">>> should_continue: tool_calls = {last.tool_calls}")
+    if hasattr(last, "tool_calls") and last.tool_calls:
+        return "tools"
+    return "end"
 
 graph = StateGraph(TradingState)
 # graph nodes 
@@ -231,8 +270,12 @@ graph.add_edge("get_live_price", "get_indicators")
 graph.add_edge("get_news","get_sentiment")
 graph.add_edge("get_sentiment","trading_model")
 graph.add_edge("get_indicators","trading_model")
-graph.add_conditional_edges("trading_model",tools_condition)
+graph.add_conditional_edges(
+    "trading_model",
+    should_continue,
+    {"tools": "tools", "end": END}
+)
 graph.add_edge("tools","trading_model")         # going back to trading model
 
 stock_bot = graph.compile()
-print(stock_bot.get_graph().draw_ascii())
+# print(stock_bot.get_graph().draw_ascii())

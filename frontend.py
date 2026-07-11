@@ -105,8 +105,11 @@ def run_all():
                     "messages": [],
                     "market_data": {},
                     "indicators": {},
-                    "signal": ""
-                })
+                    "signal": "",
+                    "live_price": 0.0,      
+                    "headlines": [],   
+                    "sentiment": [],        
+                }, config={"recursion_limit": 10})
 
                 signal = result.get("signal", "hold")
                 st.session_state.last_signals[ticker] = signal
@@ -128,7 +131,11 @@ def run_all():
                     })
 
             except Exception as e:
-                st.error(f"{ticker} error: {e}")
+                if "tool call validation failed" in str(e):
+                    st.warning(f"{ticker}: No position to sell, holding.")
+                    st.session_state.last_signals[ticker] = "hold"
+                else:
+                    st.error(f"{ticker} error: {e}")
 
 if run_now:
     run_all()
@@ -235,6 +242,5 @@ for i, ticker in enumerate(TICKERS):
 # ── Auto refresh ──────────────────────────────────────────────────────────────
 if auto_refresh:
     st.caption("⏱ Auto-refreshing every 5 minutes...")
-    time.sleep(60)
-    run_all()
+    time.sleep(300)
     st.rerun()
