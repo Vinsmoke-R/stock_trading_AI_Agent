@@ -1,0 +1,16 @@
+streamlit
+plotly
+yfinance
+pandas
+numpy
+ta
+feedparser
+transformers
+torch
+langchain
+langchain-groq
+langchain-core
+langgraph
+alpaca-py
+python-dotenv
+pymongo

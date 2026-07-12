@@ -83,16 +83,12 @@ llm_with_tools = llm.bind_tools(tools)
 
 # graph functions 
 def get_live_price_node(state: TradingState):
-    print(">>> get_live_price started")
     result = get_live_price(state["name"])
     if "error" in result:
-        print(">>> get_live_price fallback to last close")
         return {"live_price": state["market_data"]["close"][-1]}  # fallback
-    print(f">>> get_live_price done: {result['price']}")
     return {"live_price": result["price"]}
 
 def get_data(state:TradingState):
-    print(">>> get_data started")
     data = yf.download(
         tickers = state["name"],
         period="1y",
@@ -107,8 +103,6 @@ def get_data(state:TradingState):
     data.columns = data.columns.droplevel(1)
     market_data = data
 
-    print(">>> get_data done")
-
     return{
         "market_data":{
             "close" : market_data['Close'].tolist(),
@@ -120,7 +114,6 @@ def get_data(state:TradingState):
     }
 
 def get_indicators(state:TradingState):
-    print(">>> get_indicators started")
     md = state["market_data"]
 
     df = pd.DataFrame({
@@ -132,8 +125,6 @@ def get_indicators(state:TradingState):
     })
     data = add_indicators(df)   # function used of another file
 
-    print(">>> get_indicators done")
-
     return {
         "indicators": {
             "ema" : data['EMA_20'].tolist(),
@@ -144,20 +135,16 @@ def get_indicators(state:TradingState):
     }
 
 def get_news(state: TradingState):
-    print(">>> get_news started")
     name = state['name']
 
     headlines = news_fetch(name)
-    print(f">>> get_news done: {len(headlines)} headlines fetched")
     return {"headlines":headlines}   # only return the changed data 
 
 
 def get_sentiment(state: TradingState):
-    print(">>> get_sentiment started")
     headlines = state["headlines"]
 
     sentiment_result = sentiment(classifier,headlines)
-    print(f">>> get_sentiment done: {sentiment_result}")
     return {"sentiment":sentiment_result}     # only return the changed data 
 
 import json
@@ -172,7 +159,6 @@ def trading_model(state: TradingState):
             last_tool = tool_messages[-1]
             try:
                 tool_result = json.loads(last_tool.content)
-                print(">>> tool result found, ending")
                 return {
                     "balance": tool_result.get("balance", state["balance"]),
                     "position": tool_result.get("position", state["position"]),
@@ -229,8 +215,6 @@ def trading_model(state: TradingState):
     if response.tool_calls:
         signal = response.tool_calls[0]["name"]  # "buy" or "sell"
 
-    print(">>> trading_model done")
-
     return {
         "messages": messages + [response],
         "signal": signal,
@@ -241,13 +225,8 @@ tool_node = ToolNode(tools)
 def should_continue(state: TradingState):
     messages = state.get("messages", [])
     if not messages:
-        print(">>> should_continue: no messages → end")
         return "end"
     last = messages[-1]
-    print(f">>> should_continue: last message type = {type(last)}")
-    print(f">>> should_continue: has tool_calls = {hasattr(last, 'tool_calls')}")
-    if hasattr(last, "tool_calls"):
-        print(f">>> should_continue: tool_calls = {last.tool_calls}")
     if hasattr(last, "tool_calls") and last.tool_calls:
         return "tools"
     return "end"
