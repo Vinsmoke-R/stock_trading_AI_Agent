@@ -3,6 +3,7 @@ import plotly.graph_objects as go
 import time
 import yfinance as yf
 from ai_agents import stock_bot
+from backtest import backtest
 
 # ── Page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -83,13 +84,33 @@ st.markdown("## 📈 AI Trading Agent")
 st.markdown("---")
 
 # ── Controls ──────────────────────────────────────────────────────────────────
-col_btn, col_auto, col_space = st.columns([1, 1, 4])
+col_btn, col_backtest, col_auto, col_space = st.columns([1, 1, 1, 3])
 
 with col_btn:
     run_now = st.button("▶ Run Agent Now")
 
 with col_auto:
     auto_refresh = st.toggle("Auto Refresh (5 min)", value=False)
+
+with col_backtest:
+    run_backtest = st.button("📊 Run Backtest")
+
+if run_backtest:
+    st.markdown("### Backtest Results")
+    cols = st.columns(5)
+    for i, ticker in enumerate(TICKERS):
+        with st.spinner(f"Backtesting {ticker}..."):
+            result = backtest(ticker)
+        with cols[i]:
+            st.markdown(f"""
+            <div class="ticker-card">
+                <b>{ticker}</b><br>
+                <small>Strategy: {result['strategy_return']}%</small><br>
+                <small>Buy & Hold: {result['buy_and_hold']}%</small><br>
+                <small>Profit: ${result['profit']}</small><br>
+                <small>Portfolio: ${result['final_portfolio']}</small>
+            </div>
+            """, unsafe_allow_html=True)
 
 # ── Run agent for all tickers ─────────────────────────────────────────────────
 def run_all():
