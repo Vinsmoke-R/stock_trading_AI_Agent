@@ -1,13 +1,3 @@
-"""
-test_connection.py
-
-Quick sanity check: confirms your Alpaca paper trading API keys work
-by connecting and printing your account's cash/equity/buying power.
-
-Run this FIRST, before writing any trading logic, to make sure the
-plumbing (env vars -> Alpaca SDK -> real account data) works end to end.
-"""
-
 import os
 from dotenv import load_dotenv
 from alpaca.trading.client import TradingClient
