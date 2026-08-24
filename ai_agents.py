@@ -18,6 +18,14 @@ from typing import Annotated
 
 from dotenv import load_dotenv
 
+# -------------------------------------------------------------------------------------------------------------------------------
+
+from test import get_account, get_clock, get_all_positions, get_historical_bars, get_latest_quote, get_orders
+from test import submit_buy, submit_sell, start_stream
+from test import cancel_order
+
+# -------------------------------------------------------------------------------------------------------------------------------
+
 load_dotenv()
 
 llm = ChatGroq(
@@ -28,17 +36,18 @@ llm = ChatGroq(
 
 # graph class
 class TradingState(TypedDict):
-    name : str # share name (TSLA,MSFT,AAPL)
-    market_data: dict[str, list[float]] # recent price history (close,high,low,open,vol)
-    indicators : dict[str,list[float]]  # ema, rsi, vwap, atr
-    position : int # holds no of share
+    user_name : str # name of the stock holder
+    symbol : str # name of the Stock
+    market_data: dict[str, dict[str, list[float]]] # recent price history (close,high,low,open,vol)
+    indicators: dict[str, dict[str, list[float]]]  # ema, rsi, vwap, atr
+    position : dict[str,int] # hold total no of stocks 
     signal : str # buy / hold / sell
     risk : float # 0.2-> safe , 0.8->risky
     balance : float # hold profit / loss 
     messages: Annotated[list[AnyMessage], add_messages]
-    headlines : list
-    sentiment : list
-    live_price : float  # from alpaca
+    headlines : dict[str, list[str]]
+    sentiment : dict[str, list[float]]
+    live_price : dict[str, float]  # from alpaca
 
 @tool 
 def buy(balance:float, stock_price:float, position:int):
@@ -83,69 +92,67 @@ llm_with_tools = llm.bind_tools(tools)
 
 # graph functions 
 def get_live_price_node(state: TradingState):
-    result = get_live_price(state["name"])
+    symbol = state["symbol"]
+    result = get_latest_quote(symbol)
     if "error" in result:
-        return {"live_price": state["market_data"]["close"][-1]}  # fallback
-    return {"live_price": result["price"]}
+        return {"live_price": {symbol : state["market_data"][symbol]["close"][-1]}}  # fallback
+    return {"live_price": {symbol : result["price"]}}
 
 def get_data(state:TradingState):
-    data = yf.download(
-        tickers = state["name"],
-        period="1y",
-        interval="1d",
-        progress=False
-    )
-
-    if data.empty:
-        return {}
-    
+    symbol = state["symbol"]
+    data = get_historical_bars(symbol)
     # flatten the nested columns
     data.columns = data.columns.droplevel(1)
-    market_data = data
-
+    
     return{
         "market_data":{
-            "close" : market_data['Close'].tolist(),
-            "high" : market_data['High'].tolist(),
-            "low" : market_data['Low'].tolist(),
-            "open" : market_data['Open'].tolist(),
-            "volume" : market_data['Volume'].tolist()
+            symbol:{
+                "close" : data[symbol]['close'].tolist(),
+                "high" : data[symbol]['high'].tolist(),
+                "low" : data[symbol]['low'].tolist(),
+                "open" : data[symbol]['open'].tolist(),
+                "volume" : data[symbol]['volume'].tolist()
+            }
         }
     }
 
 def get_indicators(state:TradingState):
+    symbol = state["symbol"]
     md = state["market_data"]
 
     df = pd.DataFrame({
-        "Open": md["open"],
-        "High": md["high"],
-        "Low": md["low"],
-        "Close": md["close"],
-        "Volume" : md['volume']
+        "Open": md[symbol]["open"],
+        "High": md[symbol]["high"],
+        "Low": md[symbol]["low"],
+        "Close": md[symbol]["close"],
+        "Volume" : md[symbol]['volume']
     })
     data = add_indicators(df)   # function used of another file
 
     return {
-        "indicators": {
-            "ema" : data['EMA_20'].tolist(),
-            "rsi" : data['RSI_14'].tolist(),
-            "vwap" :data['VWAP'].tolist(),
-            "atr" : data['ATR'].tolist()
+        "indicators":{
+            symbol:{
+                "ema" : data['EMA_20'].tolist(),
+                "rsi" : data['RSI_14'].tolist(),
+                "vwap" :data['VWAP'].tolist(),
+                "atr" : data['ATR'].tolist()
+            }
         }
     }
 
 def get_news(state: TradingState):
-    name = state['name']
+    symbol = state['symbol']
 
-    headlines = news_fetch(name)
-    return {"headlines":headlines}   # only return the changed data 
+    headlines = news_fetch(symbol)
+    return {"headlines":{symbol:headlines}}   # only return the changed data 
 
 
 def get_sentiment(state: TradingState):
+    symbol = state["symbol"]
     headlines = state["headlines"]
 
-    sentiment_result = sentiment(classifier,headlines)
-    return {"sentiment":sentiment_result}     # only return the changed data 
+    sentiment_result = sentiment(classifier,headlines[symbol])
+    return {"sentiment":{symbol:sentiment_result}}     # only return the changed data 
 
 import json
 
@@ -167,24 +174,26 @@ def trading_model(state: TradingState):
                 }
             except (json.JSONDecodeError, TypeError):
                 pass
-    indicators = state["indicators"]
-    market_data = state["market_data"]
-    position = state.get("position", 0)
+    symbol = state["symbol"]
+    indicators = state["indicators"][symbol]
+    market_data = state["market_data"][symbol]
+    position = state.get("position", {}).get(symbol, 0)
     balance = state.get("balance", 10000.0)
-    sentiment_data = state.get("sentiment",[])
+    sentiment_data = state.get("sentiment", {}).get(symbol, [])
     risk = state.get("risk", 0.5)
     # Get the most recent values
     latest = {k: v[-1] for k, v in indicators.items() if v}
-    live_price = state.get("live_price", market_data["close"][-1])
+    live_price = state.get("live_price", {}).get(symbol, market_data["close"][-1])
 
     prompt = f"""
-        You are a stock trading agent. You have ONLY two tools available:
+        You are a professional stock trading agent. You have ONLY two tools available:
         1. "buy"  - call this to purchase a stock
         2. "sell" - call this to sell a stock
 
         DO NOT call any other tool. DO NOT call "check_signal" or any other function.
         If the decision is HOLD, do not call any tool at all.
 
+        Symbol : {symbol}
         Live Price: {live_price:.2f}
         Position (shares held): {position}
         Balance: {balance:.2f}
@@ -193,18 +202,9 @@ def trading_model(state: TradingState):
 
         Latest Indicators:
         - EMA_20: {latest.get('ema', 'N/A')}
-        - RSI_14: {latest.get('rsi', 'N/A')}  (>70 overbought, <30 oversold)
+        - RSI_14: {latest.get('rsi', 'N/A')} 
         - VWAP:   {latest.get('vwap', 'N/A')}
         - ATR:    {latest.get('atr', 'N/A')}
-
-        Rules:
-        - RSI < 30 and price < VWAP → BUY
-        - RSI > 70 and price > VWAP → SELL
-        - Otherwise → HOLD, call no tool
-        - Only buy if balance >= current price
-        - Only sell if position >= 1
-        - Only buy if sentiment is positive 
-        - Only sell if sentiment is negative 
         """
 
     messages = [{"role": "user", "content": prompt}]
@@ -258,3 +258,22 @@ graph.add_edge("tools","trading_model")         # going back to trading model
 
 stock_bot = graph.compile()
 # print(stock_bot.get_graph().draw_ascii())
+
+
+
+initial_state = {
+    "user_name": "trader_john",
+    "symbol": "AAPL",
+    "market_data": {},
+    "indicators": {},
+    "position": {},
+    "signal": "hold",
+    "risk": 0.5,
+    "balance": 10000.0,
+    "messages": [],
+    "headlines": {},
+    "sentiment": {},
+    "live_price": {},
+}
+
+result = stock_bot.invoke(initial_state)
