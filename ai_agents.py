@@ -49,42 +49,64 @@ class TradingState(TypedDict):
     live_price : dict[str, float]  # from alpaca
 
 @tool 
-def buy(balance:float, stock_price:float, position:int):
+def buy(state : TradingState):
     """Execute a buy trade: decrease balance and increase position."""
 
-    if balance<stock_price:
-        return {
-            "error":"Not enough balance",
-            "balance":balance,
-            "position":position
-        }
-    else:
-        balance -= stock_price
-        position += 1
+    symbol = state["symbol"]
+    balance = state["balance"]
+    position = state.get("position", {}).get(symbol, 0)
+    live_price = state.get("live_price", {}).get(symbol, 0)
 
-        return {
-            "balance":balance,
-            "position":position
-        }
+    qty = 1
+
+    total_cost = qty*live_price
+
+    if balance < total_cost:
+            return {
+                "success": False,
+                "error": "Not enough balance"
+            }
+
+    order = submit_buy(symbol,qty)
+
+    new_balance = balance - total_cost
+    new_position = position + 1
+
+    return {
+        "balance" : new_balance,
+        "position" : {symbol: new_position},
+        "signal" : "buy"
+    }
 
 @tool
-def sell(balance:float, stock_price:float, position:int):
+def sell(state : TradingState):
     """Execute a sell trade: increase balance and decrease position."""
 
-    if position<1:
-        return{
-            "error":"Not Enough Stocks",
-            "balance":balance,
-            "position":position
-        }
-    else:
-        balance += stock_price
-        position -= 1
+    symbol = state["symbol"]
+    balance = state["balance"]
+    position = state.get("position", {}).get(symbol, 0)
+    live_price = state.get("live_price", {}).get(symbol, 0)
 
+    qty = 1
+    total_cost = qty*live_price
+
+    if position < qty:
         return {
-            "balance":balance,
-            "position":position
+            "success":False,
+            "error": "Not enough shares"
         }
+    
+    order = submit_sell(symbol,qty)
+
+    new_balance = balance + total_cost
+    new_position = position - 1
+
+    return{
+        "balance" : new_balance,
+        "position" : {symbol:new_position},
+        "signal" : "sell"
+    }
+
 
 tools = [buy,sell] # dont use "buy" like this  -> use like this - tool
 llm_with_tools = llm.bind_tools(tools)
@@ -269,7 +291,7 @@ print(stock_bot.get_graph().draw_ascii())
 
 
 initial_state = {
-    "user_name": "trader_john",
+    "user_name": "Lucy",
     "symbol": "AAPL",
     "market_data": {},
     "indicators": {},

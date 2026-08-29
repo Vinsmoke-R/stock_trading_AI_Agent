@@ -217,15 +217,13 @@ def get_latest_quote(symbol:str):
 # 7. SUBMIT BUY
 # ============================================================
 
-def submit_buy():
+def submit_buy(symbol : str, qty : int):
 
     print("\n========== 7. BUY ORDER ==========")
 
-    symbol = "AAPL"
-
     order = MarketOrderRequest(
         symbol=symbol,
-        qty=1,
+        qty=qty,
         side=OrderSide.BUY,
         time_in_force=TimeInForce.DAY
     )
@@ -245,15 +243,13 @@ def submit_buy():
 # 8. SUBMIT SELL
 # ============================================================
 
-def submit_sell():
+def submit_sell(symbol:str, qty:int):
 
     print("\n========== 8. SELL ORDER ==========")
 
-    symbol = "AAPL"
-
     order = MarketOrderRequest(
         symbol=symbol,
-        qty=1,
+        qty=qty,
         side=OrderSide.SELL,
         time_in_force=TimeInForce.DAY
     )
