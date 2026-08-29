@@ -18,14 +18,13 @@ from typing import Annotated
 
 from dotenv import load_dotenv
 
-# -------------------------------------------------------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
 
 from test import get_account, get_clock, get_all_positions, get_historical_bars, get_latest_quote, get_orders
 from test import submit_buy, submit_sell, start_stream
 from test import cancel_order
 
-# -------------------------------------------------------------------------------------------------------------------------------
-
+# ----------------------------------------------------------------------------
 load_dotenv()
 
 llm = ChatGroq(
@@ -96,22 +95,19 @@ def get_live_price_node(state: TradingState):
     result = get_latest_quote(symbol)
     if "error" in result:
         return {"live_price": {symbol : state["market_data"][symbol]["close"][-1]}}  # fallback
-    return {"live_price": {symbol : result["price"]}}
+    return {"live_price": {symbol : result.ask_price}}
 
 def get_data(state:TradingState):
     symbol = state["symbol"]
     data = get_historical_bars(symbol)
-    # flatten the nested columns
-    data.columns = data.columns.droplevel(1)
-    
     return{
         "market_data":{
             symbol:{
-                "close" : data[symbol]['close'].tolist(),
-                "high" : data[symbol]['high'].tolist(),
-                "low" : data[symbol]['low'].tolist(),
-                "open" : data[symbol]['open'].tolist(),
-                "volume" : data[symbol]['volume'].tolist()
+                "close" : data['close'].tolist(),
+                "high" : data['high'].tolist(),
+                "low" : data['low'].tolist(),
+                "open" : data['open'].tolist(),
+                "volume" : data['volume'].tolist()
             }
         }
     }
@@ -175,6 +171,9 @@ def trading_model(state: TradingState):
             except (json.JSONDecodeError, TypeError):
                 pass
     symbol = state["symbol"]
+    # if symbol not in state.get("indicators", {}):
+    #     return {"signal": "hold", "messages": []}
+
     indicators = state["indicators"][symbol]
     market_data = state["market_data"][symbol]
     position = state.get("position", {}).get(symbol, 0)
@@ -220,6 +219,10 @@ def trading_model(state: TradingState):
         "signal": signal,
     }
 
+def join_data(state: TradingState):
+    """Node that waits for both sentiment and indicators to complete"""
+    return {}
+
 tool_node = ToolNode(tools)
 
 def should_continue(state: TradingState):
@@ -238,6 +241,7 @@ graph.add_node("get_live_price", get_live_price_node)
 graph.add_node("get_indicators",get_indicators)
 graph.add_node("get_news",get_news)
 graph.add_node("get_sentiment",get_sentiment)
+graph.add_node("join", join_data)  # NEW JOIN NODE
 graph.add_node("trading_model",trading_model)
 graph.add_node("tools",tool_node) # (name,tool)
 
@@ -247,8 +251,11 @@ graph.add_edge(START,"get_news")
 graph.add_edge("get_data", "get_live_price")  
 graph.add_edge("get_live_price", "get_indicators")  
 graph.add_edge("get_news","get_sentiment")
-graph.add_edge("get_sentiment","trading_model")
-graph.add_edge("get_indicators","trading_model")
+graph.add_edge("get_sentiment","join")
+graph.add_edge("get_indicators","join")
+# Join node goes to trading_model (NEW)
+graph.add_edge("join", "trading_model")
+
 graph.add_conditional_edges(
     "trading_model",
     should_continue,
@@ -257,7 +264,7 @@ graph.add_conditional_edges(
 graph.add_edge("tools","trading_model")         # going back to trading model
 
 stock_bot = graph.compile()
-# print(stock_bot.get_graph().draw_ascii())
+print(stock_bot.get_graph().draw_ascii())
 
 
 
