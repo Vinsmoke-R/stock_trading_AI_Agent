@@ -292,7 +292,14 @@ def trading_model(state: TradingState):
         """
 
     messages = [{"role": "user", "content": prompt}]
-    response = llm_with_tools.invoke(messages)
+    try:
+        response = llm_with_tools.invoke(messages)
+
+    except Exception:
+        logger.error(
+            f"LLM call failed for {symbol}"
+        )
+        raise
 
     # Determine signal for state tracking
     signal = "hold"
@@ -351,8 +358,7 @@ graph.add_conditional_edges(
 graph.add_edge("tools","trading_model")         # going back to trading model
 
 stock_bot = graph.compile()
-print(stock_bot.get_graph().draw_ascii())
-
+# print(stock_bot.get_graph().draw_ascii())
 
 
 initial_state = {
