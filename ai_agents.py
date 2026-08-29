@@ -75,26 +75,31 @@ def buy(state : TradingState):
 
     total_cost = qty*live_price
 
-    if balance < total_cost:
-            logger.warning(f"BUY FAILED for {symbol} - Not enough balance. Have: ${balance:.2f}, Need: ${total_cost:.2f}")
-            return {
-                "success": False,
-                "error": "Not enough balance"
-            }
+    try: 
+        if balance < total_cost:
+                logger.warning(f"BUY FAILED for {symbol} - Not enough balance. Have: ${balance:.2f}, Need: ${total_cost:.2f}")
+                return {
+                    "success": False,
+                    "error": "Not enough balance"
+                }
 
-    order = submit_buy(symbol,qty)
-    logger.info(f"BUY EXECUTED - {symbol} x{qty} @ ${live_price:.2f} | Order ID: {getattr(order, 'id', 'N/A')}")
+        order = submit_buy(symbol,qty)
+        logger.info(f"BUY EXECUTED - {symbol} x{qty} @ ${live_price:.2f} | Order ID: {getattr(order, 'id', 'N/A')}")
 
-    new_balance = balance - total_cost
-    new_position = position + 1
+        new_balance = balance - total_cost
+        new_position = position + 1
 
-    logger.info(f"Updated state - Balance: ${new_balance:.2f}, Position: {new_position}")
+        logger.info(f"Updated state - Balance: ${new_balance:.2f}, Position: {new_position}")
 
-    return {
-        "balance" : new_balance,
-        "position" : {symbol: new_position},
-        "signal" : "buy"
-    }
+        return {
+            "success": True,
+            "balance" : new_balance,
+            "position" : {symbol: new_position},
+            "signal" : "buy"
+        }
+    except Exception as e:
+        logger.error(f"Buy failed for {symbol} - Exception: {e}")
+        return {"success": False, "error" : str(e)}
 
 @tool
 def sell(state : TradingState):
@@ -108,26 +113,33 @@ def sell(state : TradingState):
     qty = 1
     total_cost = qty*live_price
 
-    if position < qty:
-        logger.warning(f"Sell failed for {symbol} - Not enough shares. Have: {position}, Need: {qty}")
-        return {
-            "success":False,
-            "error": "Not enough shares"
+    try:
+
+        if position < qty:
+            logger.warning(f"Sell failed for {symbol} - Not enough shares. Have: {position}, Need: {qty}")
+            return {
+                "success":False,
+                "error": "Not enough shares"
+            }
+        
+        order = submit_sell(symbol,qty)
+        logger.info(f"SELL EXECUTED - {symbol} x{qty} @ ${live_price:.2f} | Order ID: {getattr(order, 'id', 'N/A')}")
+
+        new_balance = balance + total_cost
+        new_position = position - 1
+
+        logger.info(f"Updated state - Balance: ${new_balance:.2f}, Position: {new_position}")
+
+        return{
+            "success" : True,
+            "balance" : new_balance,
+            "position" : {symbol:new_position},
+            "signal" : "sell"
         }
-    
-    order = submit_sell(symbol,qty)
-    logger.info(f"SELL EXECUTED - {symbol} x{qty} @ ${live_price:.2f} | Order ID: {getattr(order, 'id', 'N/A')}")
 
-    new_balance = balance + total_cost
-    new_position = position - 1
-
-    logger.info(f"Updated state - Balance: ${new_balance:.2f}, Position: {new_position}")
-
-    return{
-        "balance" : new_balance,
-        "position" : {symbol:new_position},
-        "signal" : "sell"
-    }
+    except Exception as e:
+        logger.error(f"Sell failed for {symbol} - Exception: {e}")
+        return {"success":False, "error" : str(e)}
 
 
 tools = [buy,sell] # dont use "buy" like this  -> use like this - tool
@@ -136,72 +148,89 @@ llm_with_tools = llm.bind_tools(tools)
 # graph functions 
 def get_live_price_node(state: TradingState):
     symbol = state["symbol"]
-    result = get_latest_quote(symbol)
-    if "error" in result:
+    try:
+        result = get_latest_quote(symbol)
+        logger.info(f"Live price for {symbol}: ${result.ask_price:.2f}")
+        return {"live_price": {symbol : result.ask_price}}  
+    except  Exception as e:
         fallback_price = state["market_data"][symbol]["close"][-1]
         logger.warning(f"Live quote error for {symbol}, falling back to last close: ${fallback_price:.2f}")
-        return {"live_price": {symbol : fallback_price}}  # fallback
-    
-    logger.info(f"Live price for {symbol}: ${result.ask_price:.2f}")
-    return {"live_price": {symbol : result.ask_price}}
+        return {"live_price": {symbol : fallback_price}}
 
 def get_data(state:TradingState):
     symbol = state["symbol"]
-    data = get_historical_bars(symbol)
-    logger.info(f"Fetched {len(data)} historical bars for {symbol}")
-    return{
-        "market_data":{
-            symbol:{
-                "close" : data['close'].tolist(),
-                "high" : data['high'].tolist(),
-                "low" : data['low'].tolist(),
-                "open" : data['open'].tolist(),
-                "volume" : data['volume'].tolist()
+    try:
+
+        data = get_historical_bars(symbol)
+        logger.info(f"Fetched {len(data)} historical bars for {symbol}")
+        return{
+            "market_data":{
+                symbol:{
+                    "close" : data['close'].tolist(),
+                    "high" : data['high'].tolist(),
+                    "low" : data['low'].tolist(),
+                    "open" : data['open'].tolist(),
+                    "volume" : data['volume'].tolist()
+                }
             }
         }
-    }
+    except Exception as e:
+        logger.exception(f"Failed to featch historical data for {symbol}: {e}")
+        raise
 
 def get_indicators(state:TradingState):
     symbol = state["symbol"]
-    md = state["market_data"]
+    try:
+        md = state["market_data"]
 
-    df = pd.DataFrame({
-        "Open": md[symbol]["open"],
-        "High": md[symbol]["high"],
-        "Low": md[symbol]["low"],
-        "Close": md[symbol]["close"],
-        "Volume" : md[symbol]['volume']
-    })
-    data = add_indicators(df)   # function used of another file
+        df = pd.DataFrame({
+            "Open": md[symbol]["open"],
+            "High": md[symbol]["high"],
+            "Low": md[symbol]["low"],
+            "Close": md[symbol]["close"],
+            "Volume" : md[symbol]['volume']
+        })
 
-    logger.info(f"Computed indicators for {symbol} - EMA/RSI/VWAP/ATR ready")
+        data = add_indicators(df)   # function used of another file
 
-    return {
-        "indicators":{
-            symbol:{
-                "ema" : data['EMA_20'].tolist(),
-                "rsi" : data['RSI_14'].tolist(),
-                "vwap" :data['VWAP'].tolist(),
-                "atr" : data['ATR'].tolist()
+        logger.info(f"Computed indicators for {symbol} - EMA/RSI/VWAP/ATR ready")
+
+        return {
+            "indicators":{
+                symbol:{
+                    "ema" : data['EMA_20'].tolist(),
+                    "rsi" : data['RSI_14'].tolist(),
+                    "vwap" :data['VWAP'].tolist(),
+                    "atr" : data['ATR'].tolist()
+                }
             }
         }
-    }
+    
+    except Exception as e:
+        logger.error(f"Failed to get indicators for {symbol}: {e}")
+        raise
 
 def get_news(state: TradingState):
     symbol = state['symbol']
-
-    headlines = news_fetch(symbol)
-    logger.info(f"Fetched {len(headlines)} headlines for {symbol}")
-    return {"headlines":{symbol:headlines}}   # only return the changed data 
+    try:
+        headlines = news_fetch(symbol)
+        logger.info(f"Fetched {len(headlines)} headlines for {symbol}")
+        return {"headlines":{symbol:headlines}}   # only return the changed data 
+    except Exception as e:
+        logger.error(f"Failed to fetch news for the {symbol}: {e}")
+        raise
 
 
 def get_sentiment(state: TradingState):
     symbol = state["symbol"]
     headlines = state["headlines"]
-
-    sentiment_result = sentiment(classifier,headlines[symbol])
-    logger.info(f"Sentiment for {symbol}: {sentiment_result}")
-    return {"sentiment":{symbol:sentiment_result}}     # only return the changed data 
+    try:
+        sentiment_result = sentiment(classifier,headlines[symbol])
+        logger.info(f"Sentiment for {symbol}: {sentiment_result}")
+        return {"sentiment":{symbol:sentiment_result}}     # only return the changed data 
+    except Exception as e:
+        logger.error(f"Failed to fetch sentiment for the {symbol}: {e}")
+        raise
 
 import json
 
