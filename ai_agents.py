@@ -24,6 +24,20 @@ from test import get_account, get_clock, get_all_positions, get_historical_bars,
 from test import submit_buy, submit_sell, start_stream
 from test import cancel_order
 
+import logging
+import sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("trading_bot.log", encoding="utf-8")
+    ]
+)
+
+logger = logging.getLogger("trading_bot")
+
 # ----------------------------------------------------------------------------
 load_dotenv()
 
@@ -62,15 +76,19 @@ def buy(state : TradingState):
     total_cost = qty*live_price
 
     if balance < total_cost:
+            logger.warning(f"BUY FAILED for {symbol} - Not enough balance. Have: ${balance:.2f}, Need: ${total_cost:.2f}")
             return {
                 "success": False,
                 "error": "Not enough balance"
             }
 
     order = submit_buy(symbol,qty)
+    logger.info(f"BUY EXECUTED - {symbol} x{qty} @ ${live_price:.2f} | Order ID: {getattr(order, 'id', 'N/A')}")
 
     new_balance = balance - total_cost
     new_position = position + 1
+
+    logger.info(f"Updated state - Balance: ${new_balance:.2f}, Position: {new_position}")
 
     return {
         "balance" : new_balance,
@@ -91,15 +109,19 @@ def sell(state : TradingState):
     total_cost = qty*live_price
 
     if position < qty:
+        logger.warning(f"Sell failed for {symbol} - Not enough shares. Have: {position}, Need: {qty}")
         return {
             "success":False,
             "error": "Not enough shares"
         }
     
     order = submit_sell(symbol,qty)
+    logger.info(f"SELL EXECUTED - {symbol} x{qty} @ ${live_price:.2f} | Order ID: {getattr(order, 'id', 'N/A')}")
 
     new_balance = balance + total_cost
     new_position = position - 1
+
+    logger.info(f"Updated state - Balance: ${new_balance:.2f}, Position: {new_position}")
 
     return{
         "balance" : new_balance,
@@ -116,12 +138,17 @@ def get_live_price_node(state: TradingState):
     symbol = state["symbol"]
     result = get_latest_quote(symbol)
     if "error" in result:
-        return {"live_price": {symbol : state["market_data"][symbol]["close"][-1]}}  # fallback
+        fallback_price = state["market_data"][symbol]["close"][-1]
+        logger.warning(f"Live quote error for {symbol}, falling back to last close: ${fallback_price:.2f}")
+        return {"live_price": {symbol : fallback_price}}  # fallback
+    
+    logger.info(f"Live price for {symbol}: ${result.ask_price:.2f}")
     return {"live_price": {symbol : result.ask_price}}
 
 def get_data(state:TradingState):
     symbol = state["symbol"]
     data = get_historical_bars(symbol)
+    logger.info(f"Fetched {len(data)} historical bars for {symbol}")
     return{
         "market_data":{
             symbol:{
@@ -147,6 +174,8 @@ def get_indicators(state:TradingState):
     })
     data = add_indicators(df)   # function used of another file
 
+    logger.info(f"Computed indicators for {symbol} - EMA/RSI/VWAP/ATR ready")
+
     return {
         "indicators":{
             symbol:{
@@ -162,6 +191,7 @@ def get_news(state: TradingState):
     symbol = state['symbol']
 
     headlines = news_fetch(symbol)
+    logger.info(f"Fetched {len(headlines)} headlines for {symbol}")
     return {"headlines":{symbol:headlines}}   # only return the changed data 
 
 
@@ -170,6 +200,7 @@ def get_sentiment(state: TradingState):
     headlines = state["headlines"]
 
     sentiment_result = sentiment(classifier,headlines[symbol])
+    logger.info(f"Sentiment for {symbol}: {sentiment_result}")
     return {"sentiment":{symbol:sentiment_result}}     # only return the changed data 
 
 import json
@@ -184,6 +215,7 @@ def trading_model(state: TradingState):
             last_tool = tool_messages[-1]
             try:
                 tool_result = json.loads(last_tool.content)
+                logger.info(f"Trade cycle complete - Balance: {tool_result.get('balance', state['balance'])}, Position: {tool_result.get('position', state['position'])}")
                 return {
                     "balance": tool_result.get("balance", state["balance"]),
                     "position": tool_result.get("position", state["position"]),
@@ -205,6 +237,8 @@ def trading_model(state: TradingState):
     # Get the most recent values
     latest = {k: v[-1] for k, v in indicators.items() if v}
     live_price = state.get("live_price", {}).get(symbol, market_data["close"][-1])
+
+    logger.info(f"Running trading model for {symbol} | Price: ${live_price:.2f} | Balance: ${balance:.2f} | Position: {position}")
 
     prompt = f"""
         You are a professional stock trading agent. You have ONLY two tools available:
@@ -235,6 +269,8 @@ def trading_model(state: TradingState):
     signal = "hold"
     if response.tool_calls:
         signal = response.tool_calls[0]["name"]  # "buy" or "sell"
+
+    logger.info(f"DECISION for {symbol}: {signal.upper()}")
 
     return {
         "messages": messages + [response],
@@ -305,4 +341,6 @@ initial_state = {
     "live_price": {},
 }
 
+logger.info("========== TRADING BOT STARTING ==========")
 result = stock_bot.invoke(initial_state)
+logger.info("========== TRADING BOT FINISHED ==========")
