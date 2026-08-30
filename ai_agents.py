@@ -15,6 +15,7 @@ from sentiment import classifier
 from stock_api import get_live_price
 from langgraph.graph.message import add_messages
 from typing import Annotated
+from langgraph.prebuilt import InjectedState
 
 from dotenv import load_dotenv
 
@@ -23,6 +24,7 @@ from dotenv import load_dotenv
 from test import get_account, get_clock, get_all_positions, get_historical_bars, get_latest_quote, get_orders
 from test import submit_buy, submit_sell, start_stream
 from test import cancel_order
+from test import trading_client
 
 import logging
 import sys
@@ -63,7 +65,7 @@ class TradingState(TypedDict):
     live_price : dict[str, float]  # from alpaca
 
 @tool 
-def buy(state : TradingState):
+def buy(state: Annotated[TradingState, InjectedState]):
     """Execute a buy trade: decrease balance and increase position."""
 
     symbol = state["symbol"]
@@ -94,7 +96,7 @@ def buy(state : TradingState):
         return {
             "success": True,
             "balance" : new_balance,
-            "position" : {symbol: new_position},
+            "position" : {**state.get("position", {}), symbol: new_position},
             "signal" : "buy"
         }
     except Exception as e:
@@ -102,7 +104,7 @@ def buy(state : TradingState):
         return {"success": False, "error" : str(e)}
 
 @tool
-def sell(state : TradingState):
+def sell(state: Annotated[TradingState, InjectedState]):
     """Execute a sell trade: increase balance and decrease position."""
 
     symbol = state["symbol"]
@@ -133,7 +135,7 @@ def sell(state : TradingState):
         return{
             "success" : True,
             "balance" : new_balance,
-            "position" : {symbol:new_position},
+            "position" : {**state.get("position", {}), symbol: new_position},
             "signal" : "sell"
         }
 
@@ -261,7 +263,16 @@ def trading_model(state: TradingState):
     market_data = state["market_data"][symbol]
     position = state.get("position", {}).get(symbol, 0)
     balance = state.get("balance", 10000.0)
+
     sentiment_data = state.get("sentiment", {}).get(symbol, [])
+    if sentiment_data:
+        positive = sum(1 for s in sentiment_data if s['label'] == 'positive')
+        negative = sum(1 for s in sentiment_data if s['label'] == 'negative')
+        neutral = sum(1 for s in sentiment_data if s['label'] == 'neutral')
+        sentiment_summary = f"{positive} positive, {negative} negative, {neutral} neutral"
+    else:
+        sentiment_summary = "No sentiment data"
+
     risk = state.get("risk", 0.5)
     # Get the most recent values
     latest = {k: v[-1] for k, v in indicators.items() if v}
@@ -281,7 +292,7 @@ def trading_model(state: TradingState):
         Live Price: {live_price:.2f}
         Position (shares held): {position}
         Balance: {balance:.2f}
-        Sentiment: {sentiment_data}
+        Sentiment: {sentiment_summary}
         Risk Tolerance: {risk}
 
         Latest Indicators:
@@ -345,8 +356,8 @@ graph.add_edge(START,"get_news")
 graph.add_edge("get_data", "get_live_price")  
 graph.add_edge("get_live_price", "get_indicators")  
 graph.add_edge("get_news","get_sentiment")
-graph.add_edge("get_sentiment","join")
-graph.add_edge("get_indicators","join")
+# this will prevent graph to run graph seperately 
+graph.add_edge(["get_sentiment", "get_indicators"], "join")
 # Join node goes to trading_model (NEW)
 graph.add_edge("join", "trading_model")
 
@@ -376,6 +387,17 @@ initial_state = {
     "live_price": {},
 }
 
-logger.info("========== TRADING BOT STARTING ==========")
-result = stock_bot.invoke(initial_state)
-logger.info("========== TRADING BOT FINISHED ==========")
+
+def main():
+    clock = trading_client.get_clock()
+    if not clock.is_open:
+        logger.info(f"Market is closed. Next it will open on {clock.next_open}")
+        return
+
+    logger.info("========== TRADING BOT STARTING ==========")
+    result = stock_bot.invoke(initial_state)
+    logger.info("========== TRADING BOT FINISHED ==========")
+
+
+if __name__ == "__main__":
+    main()
