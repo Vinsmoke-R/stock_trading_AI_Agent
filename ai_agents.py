@@ -380,13 +380,19 @@ stock_bot = graph.compile()
 # print(stock_bot.get_graph().draw_ascii())
 
 account = trading_client.get_account()
+positions = get_all_positions()
+
+position = {
+    p.symbol: int(float(p.qty))
+    for p in positions
+}
 
 initial_state = {
     "user_name": "Vaibhav",
     "symbol": "NVDA",
     "market_data": {},
     "indicators": {},
-    "position": {},
+    "position": position,
     "signal": "",
     "risk": 0.5,
     "balance": float(account.cash),
