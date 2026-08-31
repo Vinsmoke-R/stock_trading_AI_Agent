@@ -376,9 +376,9 @@ if __name__ == "__main__":
 
     get_orders()
 
-    get_historical_bars()
+    get_historical_bars("AAPL")
 
-    get_latest_quote()
+    get_latest_quote("AAPL")
 
 
     # --------------------------------------------------------

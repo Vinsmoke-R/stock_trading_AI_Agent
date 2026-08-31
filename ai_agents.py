@@ -68,6 +68,8 @@ class TradingState(TypedDict):
 def buy(state: Annotated[TradingState, InjectedState]):
     """Execute a buy trade: decrease balance and increase position."""
 
+    logger.info("buy() tool was entered")
+
     symbol = state["symbol"]
     balance = state["balance"]
     position = state.get("position", {}).get(symbol, 0)
@@ -106,6 +108,8 @@ def buy(state: Annotated[TradingState, InjectedState]):
 @tool
 def sell(state: Annotated[TradingState, InjectedState]):
     """Execute a sell trade: increase balance and decrease position."""
+
+    logger.info("sell() tool was entered")
 
     symbol = state["symbol"]
     balance = state["balance"]
@@ -278,7 +282,7 @@ def trading_model(state: TradingState):
     latest = {k: v[-1] for k, v in indicators.items() if v}
     live_price = state.get("live_price", {}).get(symbol, market_data["close"][-1])
 
-    logger.info(f"Running trading model for {symbol} | Price: ${live_price:.2f} | Balance: ${balance:.2f} | Position: {position}")
+    logger.info(f"Running trading model for {symbol} | Price: ${float(live_price):.2f} | Balance: ${float(balance):.2f} | Position: {position}")
 
     prompt = f"""
         You are a professional stock trading agent. You have ONLY two tools available:
@@ -289,9 +293,9 @@ def trading_model(state: TradingState):
         If the decision is HOLD, do not call any tool at all.
 
         Symbol : {symbol}
-        Live Price: {live_price:.2f}
+        Live Price: {float(live_price):.2f}
         Position (shares held): {position}
-        Balance: {balance:.2f}
+        Balance: {float(balance):.2f}
         Sentiment: {sentiment_summary}
         Risk Tolerance: {risk}
 
@@ -305,6 +309,7 @@ def trading_model(state: TradingState):
     messages = [{"role": "user", "content": prompt}]
     try:
         response = llm_with_tools.invoke(messages)
+        logger.info(f"TOOL CALLS = {response.tool_calls}")
 
     except Exception:
         logger.error(
@@ -330,13 +335,16 @@ def join_data(state: TradingState):
 
 tool_node = ToolNode(tools)
 
-def should_continue(state: TradingState):
-    messages = state.get("messages", [])
-    if not messages:
-        return "end"
-    last = messages[-1]
-    if hasattr(last, "tool_calls") and last.tool_calls:
+def should_continue(state):
+    signal = state.get("signal", "hold")
+
+    logger.info(f"ROUTING: signal={signal}")
+
+    if signal in ["buy", "sell"]:
+        logger.info("ROUTING → TOOLS")
         return "tools"
+
+    logger.info("ROUTING → END")
     return "end"
 
 graph = StateGraph(TradingState)
@@ -366,21 +374,22 @@ graph.add_conditional_edges(
     should_continue,
     {"tools": "tools", "end": END}
 )
-graph.add_edge("tools","trading_model")         # going back to trading model
+graph.add_edge("tools",END)         # going back to trading model
 
 stock_bot = graph.compile()
 # print(stock_bot.get_graph().draw_ascii())
 
+account = trading_client.get_account()
 
 initial_state = {
-    "user_name": "Lucy",
-    "symbol": "AAPL",
+    "user_name": "Vaibhav",
+    "symbol": "NVDA",
     "market_data": {},
     "indicators": {},
     "position": {},
-    "signal": "hold",
+    "signal": "",
     "risk": 0.5,
-    "balance": 10000.0,
+    "balance": float(account.cash),
     "messages": [],
     "headlines": {},
     "sentiment": {},
@@ -395,7 +404,7 @@ def main():
         return
 
     logger.info("========== TRADING BOT STARTING ==========")
-    result = stock_bot.invoke(initial_state)
+    result = stock_bot.invoke(initial_state, config={"recursion_limit": 8})
     logger.info("========== TRADING BOT FINISHED ==========")
 
 
