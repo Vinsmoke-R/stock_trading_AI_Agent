@@ -16,6 +16,8 @@ from stock_api import get_live_price
 from langgraph.graph.message import add_messages
 from typing import Annotated
 from langgraph.prebuilt import InjectedState
+from langgraph.types import Command
+from langchain_core.tools import InjectedToolCallId
 
 from dotenv import load_dotenv
 
@@ -61,11 +63,11 @@ class TradingState(TypedDict):
     balance : float # hold profit / loss 
     messages: Annotated[list[AnyMessage], add_messages]
     headlines : dict[str, list[str]]
-    sentiment : dict[str, list[float]]
+    sentiment : dict[str, list[dict]]
     live_price : dict[str, float]  # from alpaca
 
 @tool 
-def buy(state: Annotated[TradingState, InjectedState]):
+def buy(state: Annotated[TradingState, InjectedState], tool_call_id: Annotated[str, InjectedToolCallId]):
     """Execute a buy trade: decrease balance and increase position."""
 
     logger.info("buy() tool was entered")
@@ -82,10 +84,10 @@ def buy(state: Annotated[TradingState, InjectedState]):
     try: 
         if balance < total_cost:
                 logger.warning(f"BUY FAILED for {symbol} - Not enough balance. Have: ${balance:.2f}, Need: ${total_cost:.2f}")
-                return {
-                    "success": False,
-                    "error": "Not enough balance"
-                }
+                return Command(update={
+                    "signal": "hold",
+                    "messages": [ToolMessage(content="Buy failed: insufficient balance", tool_call_id=tool_call_id)]
+                })
 
         order = submit_buy(symbol,qty)
         logger.info(f"BUY EXECUTED - {symbol} x{qty} @ ${live_price:.2f} | Order ID: {getattr(order, 'id', 'N/A')}")
@@ -95,18 +97,28 @@ def buy(state: Annotated[TradingState, InjectedState]):
 
         logger.info(f"Updated state - Balance: ${new_balance:.2f}, Position: {new_position}")
 
-        return {
-            "success": True,
-            "balance" : new_balance,
-            "position" : {**state.get("position", {}), symbol: new_position},
-            "signal" : "buy"
-        }
+        return Command(update={
+            "balance": new_balance,
+            "position": {**state.get("position", {}), symbol: new_position},
+            "signal": "buy",
+            "messages": [ToolMessage(content=f"Bought {qty} {symbol}", tool_call_id=tool_call_id)]
+        })
     except Exception as e:
         logger.error(f"Buy failed for {symbol} - Exception: {e}")
-        return {"success": False, "error" : str(e)}
+        return Command(
+            update={
+                "signal": "hold",  # don't leave signal stuck on "buy" after a crash
+                "messages": [
+                    ToolMessage(
+                        content=f"Buy failed due to error: {e}",
+                        tool_call_id=tool_call_id,
+                    )
+                ],
+            }
+        )
 
 @tool
-def sell(state: Annotated[TradingState, InjectedState]):
+def sell(state: Annotated[TradingState, InjectedState], tool_call_id: Annotated[str, InjectedToolCallId]):
     """Execute a sell trade: increase balance and decrease position."""
 
     logger.info("sell() tool was entered")
@@ -123,10 +135,17 @@ def sell(state: Annotated[TradingState, InjectedState]):
 
         if position < qty:
             logger.warning(f"Sell failed for {symbol} - Not enough shares. Have: {position}, Need: {qty}")
-            return {
-                "success":False,
-                "error": "Not enough shares"
-            }
+            return Command(
+                update={
+                    "signal": "hold",  # important: don't leave signal stuck on "sell"
+                    "messages": [
+                        ToolMessage(
+                            content=f"Sell failed: not enough shares (have {position}, need {qty})",
+                            tool_call_id=tool_call_id,
+                        )
+                    ],
+                }
+            )
         
         order = submit_sell(symbol,qty)
         logger.info(f"SELL EXECUTED - {symbol} x{qty} @ ${live_price:.2f} | Order ID: {getattr(order, 'id', 'N/A')}")
@@ -136,16 +155,33 @@ def sell(state: Annotated[TradingState, InjectedState]):
 
         logger.info(f"Updated state - Balance: ${new_balance:.2f}, Position: {new_position}")
 
-        return{
-            "success" : True,
-            "balance" : new_balance,
-            "position" : {**state.get("position", {}), symbol: new_position},
-            "signal" : "sell"
-        }
+        return Command(
+            update={
+                "balance": new_balance,
+                "position": {**state.get("position", {}), symbol: new_position},
+                "signal": "sell",
+                "messages": [
+                    ToolMessage(
+                        content=f"Sold {qty} {symbol} @ ${live_price:.2f}. New balance: ${new_balance:.2f}",
+                        tool_call_id=tool_call_id,
+                    )
+                ],
+            }
+        )
 
     except Exception as e:
         logger.error(f"Sell failed for {symbol} - Exception: {e}")
-        return {"success":False, "error" : str(e)}
+        return Command(
+            update={
+                "signal": "hold",  # don't leave signal stuck on "sell" after a crash
+                "messages": [
+                    ToolMessage(
+                        content=f"Sell failed due to error: {e}",
+                        tool_call_id=tool_call_id,
+                    )
+                ],
+            }
+        )
 
 
 tools = [buy,sell] # dont use "buy" like this  -> use like this - tool
@@ -333,7 +369,7 @@ def join_data(state: TradingState):
     """Node that waits for both sentiment and indicators to complete"""
     return {}
 
-tool_node = ToolNode(tools)
+tool_node = ToolNode(tools, handle_tool_errors=False)
 
 def should_continue(state):
     signal = state.get("signal", "hold")
