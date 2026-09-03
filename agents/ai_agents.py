@@ -30,13 +30,14 @@ from backend.services.alpaca_services import trading_client
 
 import logging
 import sys
+import time 
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("trading_bot.log", encoding="utf-8")
+        logging.FileHandler("logs/trading_bot.log", encoding="utf-8")
     ]
 )
 
@@ -278,7 +279,11 @@ import json
 
 def trading_model(state: TradingState):
     messages = state.get("messages", [])
-    
+
+    if messages and isinstance(messages[-1], ToolMessage):  # checking id messages[-1] is a ToolMessage or not
+        logger.info("Pausing 3 seconds after tool execution...")
+        time.sleep(3)
+
     # check if tool was already executed — stop if so
     if len(messages) >= 3:  # has at least one full tool cycle
         tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
@@ -410,7 +415,7 @@ graph.add_conditional_edges(
     should_continue,
     {"tools": "tools", "end": END}
 )
-graph.add_edge("tools",END)         # going back to trading model
+graph.add_edge("tools","trading_model")         # going back to trading model
 
 stock_bot = graph.compile()
 # print(stock_bot.get_graph().draw_ascii())
@@ -444,9 +449,9 @@ def main():
     if not clock.is_open:
         logger.info(f"Market is closed. Next it will open on {clock.next_open}")
         return
-
+    
     logger.info("========== TRADING BOT STARTING ==========")
-    result = stock_bot.invoke(initial_state, config={"recursion_limit": 8})
+    result = stock_bot.invoke(initial_state, config={"recursion_limit": 25})
     logger.info("========== TRADING BOT FINISHED ==========")
 
 
