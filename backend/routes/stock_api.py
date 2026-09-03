@@ -7,7 +7,7 @@ from alpaca.data.enums import DataFeed
 from alpaca.data.timeframe import TimeFrame
 from datetime import datetime, timedelta
 from alpaca.data.requests import StockLatestTradeRequest
-from indicators import add_indicators
+from data.indicators import add_indicators
 from alpaca.common.exceptions import APIError
 
 load_dotenv()

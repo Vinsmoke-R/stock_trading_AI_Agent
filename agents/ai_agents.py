@@ -1,0 +1,454 @@
+from langchain_groq import ChatGroq
+from langgraph.graph import StateGraph, START, END
+from typing import TypedDict
+from data.indicators import add_indicators
+from langgraph.prebuilt import ToolNode
+from langchain_core.messages import ToolMessage
+from langchain_core.tools import tool
+from langchain_core.messages import AIMessage
+import yfinance as yf
+import pandas as pd
+from langchain_core.messages import AnyMessage
+from data.sentiment import sentiment
+from data.news_api import news_fetch
+from data.sentiment import classifier
+from backend.routes.stock_api import get_live_price
+from langgraph.graph.message import add_messages
+from typing import Annotated
+from langgraph.prebuilt import InjectedState
+from langgraph.types import Command
+from langchain_core.tools import InjectedToolCallId
+
+from dotenv import load_dotenv
+
+# ----------------------------------------------------------------------------
+
+from backend.services.alpaca_services import get_account, get_clock, get_all_positions, get_historical_bars, get_latest_quote, get_orders
+from backend.services.alpaca_services import submit_buy, submit_sell, start_stream
+from backend.services.alpaca_services import cancel_order
+from backend.services.alpaca_services import trading_client
+
+import logging
+import sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler("trading_bot.log", encoding="utf-8")
+    ]
+)
+
+logger = logging.getLogger("trading_bot")
+
+# ----------------------------------------------------------------------------
+load_dotenv()
+
+llm = ChatGroq(
+    model="openai/gpt-oss-120b",  # current and reliable
+    temperature=0,
+    max_tokens = 500,
+)
+
+# graph class
+class TradingState(TypedDict):
+    user_name : str # name of the stock holder
+    symbol : str # name of the Stock
+    market_data: dict[str, dict[str, list[float]]] # recent price history (close,high,low,open,vol)
+    indicators: dict[str, dict[str, list[float]]]  # ema, rsi, vwap, atr
+    position : dict[str,int] # hold total no of stocks 
+    signal : str # buy / hold / sell
+    risk : float # 0.2-> safe , 0.8->risky
+    balance : float # hold profit / loss 
+    messages: Annotated[list[AnyMessage], add_messages]
+    headlines : dict[str, list[str]]
+    sentiment : dict[str, list[dict]]
+    live_price : dict[str, float]  # from alpaca
+
+@tool 
+def buy(state: Annotated[TradingState, InjectedState], tool_call_id: Annotated[str, InjectedToolCallId]):
+    """Execute a buy trade: decrease balance and increase position."""
+
+    logger.info("buy() tool was entered")
+
+    symbol = state["symbol"]
+    balance = state["balance"]
+    position = state.get("position", {}).get(symbol, 0)
+    live_price = state.get("live_price", {}).get(symbol, 0)
+
+    qty = 1
+
+    total_cost = qty*live_price
+
+    try: 
+        if balance < total_cost:
+                logger.warning(f"BUY FAILED for {symbol} - Not enough balance. Have: ${balance:.2f}, Need: ${total_cost:.2f}")
+                return Command(update={
+                    "signal": "hold",
+                    "messages": [ToolMessage(content="Buy failed: insufficient balance", tool_call_id=tool_call_id)]
+                })
+
+        order = submit_buy(symbol,qty)
+        logger.info(f"BUY EXECUTED - {symbol} x{qty} @ ${live_price:.2f} | Order ID: {getattr(order, 'id', 'N/A')}")
+
+        new_balance = balance - total_cost
+        new_position = position + 1
+
+        logger.info(f"Updated state - Balance: ${new_balance:.2f}, Position: {new_position}")
+
+        return Command(update={
+            "balance": new_balance,
+            "position": {**state.get("position", {}), symbol: new_position},
+            "signal": "buy",
+            "messages": [ToolMessage(content=f"Bought {qty} {symbol}", tool_call_id=tool_call_id)]
+        })
+    except Exception as e:
+        logger.error(f"Buy failed for {symbol} - Exception: {e}")
+        return Command(
+            update={
+                "signal": "hold",  # don't leave signal stuck on "buy" after a crash
+                "messages": [
+                    ToolMessage(
+                        content=f"Buy failed due to error: {e}",
+                        tool_call_id=tool_call_id,
+                    )
+                ],
+            }
+        )
+
+@tool
+def sell(state: Annotated[TradingState, InjectedState], tool_call_id: Annotated[str, InjectedToolCallId]):
+    """Execute a sell trade: increase balance and decrease position."""
+
+    logger.info("sell() tool was entered")
+
+    symbol = state["symbol"]
+    balance = state["balance"]
+    position = state.get("position", {}).get(symbol, 0)
+    live_price = state.get("live_price", {}).get(symbol, 0)
+
+    qty = 1
+    total_cost = qty*live_price
+
+    try:
+
+        if position < qty:
+            logger.warning(f"Sell failed for {symbol} - Not enough shares. Have: {position}, Need: {qty}")
+            return Command(
+                update={
+                    "signal": "hold",  # important: don't leave signal stuck on "sell"
+                    "messages": [
+                        ToolMessage(
+                            content=f"Sell failed: not enough shares (have {position}, need {qty})",
+                            tool_call_id=tool_call_id,
+                        )
+                    ],
+                }
+            )
+        
+        order = submit_sell(symbol,qty)
+        logger.info(f"SELL EXECUTED - {symbol} x{qty} @ ${live_price:.2f} | Order ID: {getattr(order, 'id', 'N/A')}")
+
+        new_balance = balance + total_cost
+        new_position = position - 1
+
+        logger.info(f"Updated state - Balance: ${new_balance:.2f}, Position: {new_position}")
+
+        return Command(
+            update={
+                "balance": new_balance,
+                "position": {**state.get("position", {}), symbol: new_position},
+                "signal": "sell",
+                "messages": [
+                    ToolMessage(
+                        content=f"Sold {qty} {symbol} @ ${live_price:.2f}. New balance: ${new_balance:.2f}",
+                        tool_call_id=tool_call_id,
+                    )
+                ],
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Sell failed for {symbol} - Exception: {e}")
+        return Command(
+            update={
+                "signal": "hold",  # don't leave signal stuck on "sell" after a crash
+                "messages": [
+                    ToolMessage(
+                        content=f"Sell failed due to error: {e}",
+                        tool_call_id=tool_call_id,
+                    )
+                ],
+            }
+        )
+
+
+tools = [buy,sell] # dont use "buy" like this  -> use like this - tool
+llm_with_tools = llm.bind_tools(tools)
+
+# graph functions 
+def get_live_price_node(state: TradingState):
+    symbol = state["symbol"]
+    try:
+        result = get_latest_quote(symbol)
+        logger.info(f"Live price for {symbol}: ${result.ask_price:.2f}")
+        return {"live_price": {symbol : result.ask_price}}  
+    except  Exception as e:
+        fallback_price = state["market_data"][symbol]["close"][-1]
+        logger.warning(f"Live quote error for {symbol}, falling back to last close: ${fallback_price:.2f}")
+        return {"live_price": {symbol : fallback_price}}
+
+def get_data(state:TradingState):
+    symbol = state["symbol"]
+    try:
+
+        data = get_historical_bars(symbol)
+        logger.info(f"Fetched {len(data)} historical bars for {symbol}")
+        return{
+            "market_data":{
+                symbol:{
+                    "close" : data['close'].tolist(),
+                    "high" : data['high'].tolist(),
+                    "low" : data['low'].tolist(),
+                    "open" : data['open'].tolist(),
+                    "volume" : data['volume'].tolist()
+                }
+            }
+        }
+    except Exception as e:
+        logger.exception(f"Failed to featch historical data for {symbol}: {e}")
+        raise
+
+def get_indicators(state:TradingState):
+    symbol = state["symbol"]
+    try:
+        md = state["market_data"]
+
+        df = pd.DataFrame({
+            "Open": md[symbol]["open"],
+            "High": md[symbol]["high"],
+            "Low": md[symbol]["low"],
+            "Close": md[symbol]["close"],
+            "Volume" : md[symbol]['volume']
+        })
+
+        data = add_indicators(df)   # function used of another file
+
+        logger.info(f"Computed indicators for {symbol} - EMA/RSI/VWAP/ATR ready")
+
+        return {
+            "indicators":{
+                symbol:{
+                    "ema" : data['EMA_20'].tolist(),
+                    "rsi" : data['RSI_14'].tolist(),
+                    "vwap" :data['VWAP'].tolist(),
+                    "atr" : data['ATR'].tolist()
+                }
+            }
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to get indicators for {symbol}: {e}")
+        raise
+
+def get_news(state: TradingState):
+    symbol = state['symbol']
+    try:
+        headlines = news_fetch(symbol)
+        logger.info(f"Fetched {len(headlines)} headlines for {symbol}")
+        return {"headlines":{symbol:headlines}}   # only return the changed data 
+    except Exception as e:
+        logger.error(f"Failed to fetch news for the {symbol}: {e}")
+        raise
+
+
+def get_sentiment(state: TradingState):
+    symbol = state["symbol"]
+    headlines = state["headlines"]
+    try:
+        sentiment_result = sentiment(classifier,headlines[symbol])
+        logger.info(f"Sentiment for {symbol}: {sentiment_result}")
+        return {"sentiment":{symbol:sentiment_result}}     # only return the changed data 
+    except Exception as e:
+        logger.error(f"Failed to fetch sentiment for the {symbol}: {e}")
+        raise
+
+import json
+
+def trading_model(state: TradingState):
+    messages = state.get("messages", [])
+    
+    # check if tool was already executed — stop if so
+    if len(messages) >= 3:  # has at least one full tool cycle
+        tool_messages = [m for m in messages if isinstance(m, ToolMessage)]
+        if tool_messages:
+            last_tool = tool_messages[-1]
+            try:
+                tool_result = json.loads(last_tool.content)
+                logger.info(f"Trade cycle complete - Balance: {tool_result.get('balance', state['balance'])}, Position: {tool_result.get('position', state['position'])}")
+                return {
+                    "balance": tool_result.get("balance", state["balance"]),
+                    "position": tool_result.get("position", state["position"]),
+                    "messages": [AIMessage(content="Trade done.")],
+                    "signal": state.get("signal", "hold"),
+                }
+            except (json.JSONDecodeError, TypeError):
+                pass
+    symbol = state["symbol"]
+    # if symbol not in state.get("indicators", {}):
+    #     return {"signal": "hold", "messages": []}
+
+    indicators = state["indicators"][symbol]
+    market_data = state["market_data"][symbol]
+    position = state.get("position", {}).get(symbol, 0)
+    balance = state.get("balance", 10000.0)
+
+    sentiment_data = state.get("sentiment", {}).get(symbol, [])
+    if sentiment_data:
+        positive = sum(1 for s in sentiment_data if s['label'] == 'positive')
+        negative = sum(1 for s in sentiment_data if s['label'] == 'negative')
+        neutral = sum(1 for s in sentiment_data if s['label'] == 'neutral')
+        sentiment_summary = f"{positive} positive, {negative} negative, {neutral} neutral"
+    else:
+        sentiment_summary = "No sentiment data"
+
+    risk = state.get("risk", 0.5)
+    # Get the most recent values
+    latest = {k: v[-1] for k, v in indicators.items() if v}
+    live_price = state.get("live_price", {}).get(symbol, market_data["close"][-1])
+
+    logger.info(f"Running trading model for {symbol} | Price: ${float(live_price):.2f} | Balance: ${float(balance):.2f} | Position: {position}")
+
+    prompt = f"""
+        You are a professional stock trading agent. You have ONLY two tools available:
+        1. "buy"  - call this to purchase a stock
+        2. "sell" - call this to sell a stock
+
+        DO NOT call any other tool. DO NOT call "check_signal" or any other function.
+        If the decision is HOLD, do not call any tool at all.
+
+        Symbol : {symbol}
+        Live Price: {float(live_price):.2f}
+        Position (shares held): {position}
+        Balance: {float(balance):.2f}
+        Sentiment: {sentiment_summary}
+        Risk Tolerance: {risk}
+
+        Latest Indicators:
+        - EMA_20: {latest.get('ema', 'N/A')}
+        - RSI_14: {latest.get('rsi', 'N/A')} 
+        - VWAP:   {latest.get('vwap', 'N/A')}
+        - ATR:    {latest.get('atr', 'N/A')}
+        """
+
+    messages = [{"role": "user", "content": prompt}]
+    try:
+        response = llm_with_tools.invoke(messages)
+        logger.info(f"TOOL CALLS = {response.tool_calls}")
+
+    except Exception:
+        logger.error(
+            f"LLM call failed for {symbol}"
+        )
+        raise
+
+    # Determine signal for state tracking
+    signal = "hold"
+    if response.tool_calls:
+        signal = response.tool_calls[0]["name"]  # "buy" or "sell"
+
+    logger.info(f"DECISION for {symbol}: {signal.upper()}")
+
+    return {
+        "messages": messages + [response],
+        "signal": signal,
+    }
+
+def join_data(state: TradingState):
+    """Node that waits for both sentiment and indicators to complete"""
+    return {}
+
+tool_node = ToolNode(tools, handle_tool_errors=False)
+
+def should_continue(state):
+    signal = state.get("signal", "hold")
+
+    logger.info(f"ROUTING: signal={signal}")
+
+    if signal in ["buy", "sell"]:
+        logger.info("ROUTING → TOOLS")
+        return "tools"
+
+    logger.info("ROUTING → END")
+    return "end"
+
+graph = StateGraph(TradingState)
+# graph nodes 
+graph.add_node("get_data",get_data)
+graph.add_node("get_live_price", get_live_price_node)
+graph.add_node("get_indicators",get_indicators)
+graph.add_node("get_news",get_news)
+graph.add_node("get_sentiment",get_sentiment)
+graph.add_node("join", join_data)  # NEW JOIN NODE
+graph.add_node("trading_model",trading_model)
+graph.add_node("tools",tool_node) # (name,tool)
+
+# graph edges 
+graph.add_edge(START,"get_data")
+graph.add_edge(START,"get_news")
+graph.add_edge("get_data", "get_live_price")  
+graph.add_edge("get_live_price", "get_indicators")  
+graph.add_edge("get_news","get_sentiment")
+# this will prevent graph to run graph seperately 
+graph.add_edge(["get_sentiment", "get_indicators"], "join")
+# Join node goes to trading_model (NEW)
+graph.add_edge("join", "trading_model")
+
+graph.add_conditional_edges(
+    "trading_model",
+    should_continue,
+    {"tools": "tools", "end": END}
+)
+graph.add_edge("tools",END)         # going back to trading model
+
+stock_bot = graph.compile()
+# print(stock_bot.get_graph().draw_ascii())
+
+account = trading_client.get_account()
+positions = get_all_positions()
+
+position = {
+    p.symbol: int(float(p.qty))
+    for p in positions
+}
+
+initial_state = {
+    "user_name": "Vaibhav",
+    "symbol": "NVDA",
+    "market_data": {},
+    "indicators": {},
+    "position": position,
+    "signal": "",
+    "risk": 0.5,
+    "balance": float(account.cash),
+    "messages": [],
+    "headlines": {},
+    "sentiment": {},
+    "live_price": {},
+}
+
+
+def main():
+    clock = trading_client.get_clock()
+    if not clock.is_open:
+        logger.info(f"Market is closed. Next it will open on {clock.next_open}")
+        return
+
+    logger.info("========== TRADING BOT STARTING ==========")
+    result = stock_bot.invoke(initial_state, config={"recursion_limit": 8})
+    logger.info("========== TRADING BOT FINISHED ==========")
+
+
+if __name__ == "__main__":
+    main()

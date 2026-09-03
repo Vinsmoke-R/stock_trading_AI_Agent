@@ -1,5 +1,5 @@
 import yfinance as yf
-from indicators import add_indicators
+from data.indicators import add_indicators
 
 def backtest(ticker="AAPL", initial_balance=10000):
     data = yf.download(ticker, period="1y", interval="1d", progress=False)

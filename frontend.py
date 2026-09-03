@@ -2,7 +2,7 @@ import streamlit as st
 import plotly.graph_objects as go
 import time
 import yfinance as yf
-from ai_agents import stock_bot
+from agents.ai_agents import stock_bot
 from backtest import backtest
 
 # ── Page config ──────────────────────────────────────────────────────────────
